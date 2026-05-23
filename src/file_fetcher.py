@@ -1,63 +1,74 @@
-import os
+"""Fetch dependency files from GitHub at specific git refs."""
+
 import base64
+from typing import Optional
+
 import urllib.request
 import urllib.error
 import json
 
-SUPPORTED_FILES = ["requirements.txt", "package.json"]
+GITHUB_API = "https://api.github.com"
+KNOWN_DEPENDENCY_FILES = ["requirements.txt", "package.json", "Pipfile", "pyproject.toml"]
 
 
 def get_headers(token: str) -> dict:
+    """Return HTTP headers required for GitHub API requests."""
     return {
         "Authorization": f"Bearer {token}",
         "Accept": "application/vnd.github.v3+json",
-        "User-Agent": "depgraph-action",
+        "X-GitHub-Api-Version": "2022-11-28",
     }
 
 
-def fetch_file_at_ref(repo: str, path: str, ref: str, token: str) -> str | None:
+def fetch_file_at_ref(repo: str, filepath: str, ref: str, token: str) -> Optional[str]:
+    """Fetch the raw text content of a file at a specific git ref.
+
+    Returns:
+        Decoded file content as a string, or None if the file does not exist.
+
+    Raises:
+        RuntimeError: For unexpected HTTP errors (not 404).
     """
-    Fetch the raw content of a file from a GitHub repo at a given ref (branch/SHA).
-    Returns the decoded string content, or None if the file does not exist.
-    """
-    url = f"https://api.github.com/repos/{repo}/contents/{path}?ref={ref}"
+    url = f"{GITHUB_API}/repos/{repo}/contents/{filepath}?ref={ref}"
     req = urllib.request.Request(url, headers=get_headers(token))
     try:
         with urllib.request.urlopen(req) as resp:
             data = json.loads(resp.read().decode())
-            if data.get("encoding") == "base64":
-                return base64.b64decode(data["content"]).decode("utf-8")
-            return data.get("content", "")
-    except urllib.error.HTTPError as e:
-        if e.code == 404:
+            return base64.b64decode(data["content"]).decode("utf-8")
+    except urllib.error.HTTPError as exc:
+        if exc.code == 404:
             return None
-        raise
+        raise RuntimeError(f"GitHub API error {exc.code} fetching {filepath}@{ref}") from exc
 
 
-def detect_dependency_file(repo: str, ref: str, token: str) -> tuple[str, str] | tuple[None, None]:
+def detect_dependency_file(repo: str, ref: str, token: str) -> Optional[str]:
+    """Return the first known dependency filename found in the repo at ref.
+
+    Returns:
+        Filename string (e.g. 'requirements.txt'), or None if none detected.
     """
-    Detect the first supported dependency file in the repo at the given ref.
-    Returns a (filename, content) tuple, or (None, None) if none found.
-    """
-    for filename in SUPPORTED_FILES:
-        content = fetch_file_at_ref(repo, filename, ref, token)
+    for candidate in KNOWN_DEPENDENCY_FILES:
+        content = fetch_file_at_ref(repo, candidate, ref, token)
         if content is not None:
-            return filename, content
-    return None, None
+            return candidate
+    return None
 
 
-def fetch_base_and_head(repo: str, base_ref: str, head_ref: str, token: str) -> dict:
+def fetch_base_and_head(
+    repo: str, base_ref: str, head_ref: str, token: str
+) -> tuple[Optional[str], Optional[str], Optional[str]]:
+    """Fetch dependency file contents for both base and head refs.
+
+    Returns:
+        A tuple of (filepath, base_content, head_content).  filepath is the
+        detected dependency filename; either content may be None if the file
+        does not exist at that ref.
     """
-    Fetch dependency file contents for both base and head refs.
-    Returns a dict with keys: filename, base_content, head_content.
-    """
-    filename, head_content = detect_dependency_file(repo, head_ref, token)
-    if filename is None:
-        return {"filename": None, "base_content": "", "head_content": ""}
-
-    base_content = fetch_file_at_ref(repo, filename, base_ref, token) or ""
-    return {
-        "filename": filename,
-        "base_content": base_content,
-        "head_content": head_content,
-    }
+    filepath = detect_dependency_file(repo, head_ref, token) or detect_dependency_file(
+        repo, base_ref, token
+    )
+    if filepath is None:
+        return None, None, None
+    base_content = fetch_file_at_ref(repo, filepath, base_ref, token)
+    head_content = fetch_file_at_ref(repo, filepath, head_ref, token)
+    return filepath, base_content, head_content
